@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>BTC Price Chart</title>
+<title>DeepChart — BTC Price + Depth</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
   html, body {
@@ -15,16 +15,58 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     overflow: hidden;
   }
+  .page {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
   #chart-frame {
     display: block;
     width: 100%;
-    height: 100vh;
+    height: 58%;
     border: 0;
+    flex-shrink: 0;
+  }
+  #depth-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-top: 1px solid var(--tg-theme-hint-color, #cccccc);
+  }
+  #depth-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 6px 10px;
+    font-size: 0.75rem;
+    color: var(--tg-theme-hint-color, #999999);
+    flex-shrink: 0;
+  }
+  #depth-header strong {
+    color: var(--tg-theme-text-color, #000000);
+    font-size: 0.9rem;
+  }
+  #depth-canvas {
+    flex: 1;
+    width: 100%;
+    display: block;
   }
 </style>
 </head>
 <body>
-  <iframe id="chart-frame" allowtransparency="true" scrolling="yes"></iframe>
+  <div class="page">
+    <iframe id="chart-frame" allowtransparency="true" scrolling="yes"></iframe>
+
+    <div id="depth-panel">
+      <div id="depth-header">
+        <span>BTC/USDT depth</span>
+        <strong id="mid-price">connecting…</strong>
+        <span id="spread"></span>
+      </div>
+      <canvas id="depth-canvas"></canvas>
+    </div>
+  </div>
 
   <script>
     const tg = window.Telegram && window.Telegram.WebApp;
@@ -35,10 +77,125 @@
 
     const theme = (tg && tg.colorScheme === "dark") ? "dark" : "light";
 
-    const src = "https://s.tradingview.com/widgetembed/?symbol=BINANCE%3ABTCUSDT"
+    // Price chart: TradingView's free public widget embed.
+    const chartSrc = "https://s.tradingview.com/widgetembed/?symbol=BINANCE%3ABTCUSDT"
       + "&interval=15&hidesidetoolbar=1&style=1&timezone=Etc%2FUTC&theme=" + theme;
+    document.getElementById("chart-frame").src = chartSrc;
 
-    document.getElementById("chart-frame").src = src;
+    // Order book depth chart: Binance public WebSocket, independent of TradingView.
+    const canvas = document.getElementById("depth-canvas");
+    const ctx = canvas.getContext("2d");
+    const midPriceEl = document.getElementById("mid-price");
+    const spreadEl = document.getElementById("spread");
+
+    const rootStyle = getComputedStyle(document.documentElement);
+    function themeColor(varName, fallback) {
+      return rootStyle.getPropertyValue(varName).trim() || fallback;
+    }
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawDepthChart();
+    }
+    window.addEventListener("resize", resizeCanvas);
+
+    let latestBids = [];
+    let latestAsks = [];
+
+    function drawDepthChart() {
+      const rect = canvas.getBoundingClientRect();
+      const w = rect.width;
+      const h = rect.height;
+      ctx.clearRect(0, 0, w, h);
+
+      if (!latestBids.length || !latestAsks.length) return;
+
+      // Cumulative volume: bids walking down from best bid, asks walking up from best ask.
+      let cum = 0;
+      const bidLevels = latestBids.map(([price, qty]) => { cum += qty; return [price, cum]; });
+      cum = 0;
+      const askLevels = latestAsks.map(([price, qty]) => { cum += qty; return [price, cum]; });
+
+      const bestBid = latestBids[0][0];
+      const bestAsk = latestAsks[0][0];
+      const mid = (bestBid + bestAsk) / 2;
+      const spread = bestAsk - bestBid;
+      midPriceEl.textContent = "$" + mid.toFixed(2);
+      spreadEl.textContent = "spread $" + spread.toFixed(2);
+
+      const minPrice = bidLevels[bidLevels.length - 1][0];
+      const maxPrice = askLevels[askLevels.length - 1][0];
+      const maxVolume = Math.max(bidLevels[bidLevels.length - 1][1], askLevels[askLevels.length - 1][1]);
+
+      const padTop = 10, padBottom = 18, padSide = 6;
+      const plotW = w - padSide * 2;
+      const plotH = h - padTop - padBottom;
+
+      const xForPrice = (p) => padSide + ((p - minPrice) / (maxPrice - minPrice)) * plotW;
+      const yForVolume = (v) => padTop + plotH - (v / maxVolume) * plotH;
+
+      function drawArea(levels, strokeColor, fillColor) {
+        ctx.beginPath();
+        ctx.moveTo(xForPrice(levels[0][0]), yForVolume(0));
+        for (let i = 0; i < levels.length; i++) {
+          const [price, vol] = levels[i];
+          ctx.lineTo(xForPrice(price), yForVolume(vol));
+          if (i < levels.length - 1) ctx.lineTo(xForPrice(levels[i + 1][0]), yForVolume(vol));
+        }
+        ctx.lineTo(xForPrice(levels[levels.length - 1][0]), yForVolume(0));
+        ctx.closePath();
+        ctx.fillStyle = fillColor;
+        ctx.fill();
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      drawArea(bidLevels, "#26a69a", "rgba(38, 166, 154, 0.25)");
+      drawArea(askLevels, "#ef5350", "rgba(239, 83, 80, 0.25)");
+
+      // Mid-price marker.
+      ctx.strokeStyle = themeColor("--tg-theme-hint-color", "#999999");
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(xForPrice(mid), padTop);
+      ctx.lineTo(xForPrice(mid), padTop + plotH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Price axis labels.
+      ctx.fillStyle = themeColor("--tg-theme-hint-color", "#999999");
+      ctx.font = "10px -apple-system, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText(minPrice.toFixed(0), padSide, h - 4);
+      ctx.textAlign = "right";
+      ctx.fillText(maxPrice.toFixed(0), w - padSide, h - 4);
+    }
+
+    let ws;
+    let reconnectTimer;
+    function connectDepthStream() {
+      ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@depth20@100ms");
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        latestBids = data.bids.map(([p, q]) => [parseFloat(p), parseFloat(q)]);
+        latestAsks = data.asks.map(([p, q]) => [parseFloat(p), parseFloat(q)]);
+        drawDepthChart();
+      };
+      ws.onclose = () => {
+        midPriceEl.textContent = "reconnecting…";
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(connectDepthStream, 2000);
+      };
+      ws.onerror = () => ws.close();
+    }
+
+    resizeCanvas();
+    connectDepthStream();
   </script>
 </body>
 </html>
