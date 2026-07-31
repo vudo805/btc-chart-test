@@ -90,7 +90,11 @@
         vertLines: { color: gridColor + "33" },
         horzLines: { color: gridColor + "33" },
       },
-      timeScale: { timeVisible: true, secondsVisible: false },
+      // rightOffset reserves space past the last candle so "now" (always a
+      // little ahead of the still-open last bar) has a valid pixel position
+      // for the heatmap to plot into - otherwise timeToCoordinate() returns
+      // null for every live snapshot and the heatmap never draws anything.
+      timeScale: { timeVisible: true, secondsVisible: false, rightOffset: 3 },
       rightPriceScale: { borderColor: gridColor },
       crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     });
