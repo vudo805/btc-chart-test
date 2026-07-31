@@ -80,7 +80,7 @@
     const gridColor = themeColor("--tg-theme-hint-color", "#cccccc");
 
     const SYMBOL = "btcusdt";
-    const INTERVAL = "15m";
+    const INTERVAL = "1m";
 
     // ---- Price chart: self-hosted so the heatmap can share its exact coordinate space ----
     const chartWrap = document.getElementById("chart-wrap");
@@ -132,6 +132,15 @@
           low: parseFloat(r[3]),
           close: parseFloat(r[4]),
         })));
+        // Zoom to a window comparable to the live heatmap's history span
+        // (HISTORY_LIMIT * SNAPSHOT_INTERVAL_MS below) - otherwise the
+        // heatmap dots are squeezed into a sliver at the chart's edge and
+        // are effectively invisible against the full fetched history.
+        const nowSec = Math.floor(Date.now() / 1000);
+        chart.timeScale().setVisibleRange({
+          from: nowSec - 15 * 60,
+          to: nowSec + 2 * 60,
+        });
         resizeAll();
       })
       .catch((err) => console.error("Failed to load initial candles", err));
@@ -189,8 +198,8 @@
       for (const entry of heatmapHistory) {
         const x = chart.timeScale().timeToCoordinate(entry.time);
         if (x === null) continue;
-        drawLevels(entry.bids, x, "38,166,154");
-        drawLevels(entry.asks, x, "239,83,80");
+        drawLevels(entry.bids, x, "33,150,243");
+        drawLevels(entry.asks, x, "255,152,0");
       }
     }
 
