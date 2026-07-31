@@ -3,8 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>DeepChart — BTC Price + Depth</title>
+<title>BTC Price + Liquidity Heatmap</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   html, body {
     margin: 0;
@@ -20,21 +21,7 @@
     flex-direction: column;
     height: 100vh;
   }
-  #chart-frame {
-    display: block;
-    width: 100%;
-    height: 58%;
-    border: 0;
-    flex-shrink: 0;
-  }
-  #depth-panel {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    border-top: 1px solid var(--tg-theme-hint-color, #cccccc);
-  }
-  #depth-header {
+  #header {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
@@ -43,28 +30,37 @@
     color: var(--tg-theme-hint-color, #999999);
     flex-shrink: 0;
   }
-  #depth-header strong {
+  #header strong {
     color: var(--tg-theme-text-color, #000000);
     font-size: 0.9rem;
   }
-  #depth-canvas {
+  #chart-wrap {
+    position: relative;
     flex: 1;
+    min-height: 0;
+  }
+  #chart-container, #heatmap-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
-    display: block;
+    height: 100%;
+  }
+  #heatmap-canvas {
+    pointer-events: none;
   }
 </style>
 </head>
 <body>
   <div class="page">
-    <iframe id="chart-frame" allowtransparency="true" scrolling="yes"></iframe>
-
-    <div id="depth-panel">
-      <div id="depth-header">
-        <span>BTC/USDT depth</span>
-        <strong id="mid-price">connecting…</strong>
-        <span id="spread"></span>
-      </div>
-      <canvas id="depth-canvas"></canvas>
+    <div id="header">
+      <span>BTC/USDT</span>
+      <strong id="mid-price">connecting…</strong>
+      <span id="spread"></span>
+    </div>
+    <div id="chart-wrap">
+      <div id="chart-container"></div>
+      <canvas id="heatmap-canvas"></canvas>
     </div>
   </div>
 
@@ -75,126 +71,156 @@
       tg.expand();
     }
 
-    const theme = (tg && tg.colorScheme === "dark") ? "dark" : "light";
-
-    // Price chart: TradingView's free public widget embed.
-    const chartSrc = "https://s.tradingview.com/widgetembed/?symbol=BINANCE%3ABTCUSDT"
-      + "&interval=15&hidesidetoolbar=1&style=1&timezone=Etc%2FUTC&theme=" + theme;
-    document.getElementById("chart-frame").src = chartSrc;
-
-    // Order book depth chart: Binance public WebSocket, independent of TradingView.
-    const canvas = document.getElementById("depth-canvas");
-    const ctx = canvas.getContext("2d");
-    const midPriceEl = document.getElementById("mid-price");
-    const spreadEl = document.getElementById("spread");
-
     const rootStyle = getComputedStyle(document.documentElement);
     function themeColor(varName, fallback) {
       return rootStyle.getPropertyValue(varName).trim() || fallback;
     }
+    const bgColor = themeColor("--tg-theme-bg-color", "#ffffff");
+    const textColor = themeColor("--tg-theme-text-color", "#000000");
+    const gridColor = themeColor("--tg-theme-hint-color", "#cccccc");
 
-    function resizeCanvas() {
+    const SYMBOL = "btcusdt";
+    const INTERVAL = "15m";
+
+    // ---- Price chart: self-hosted so the heatmap can share its exact coordinate space ----
+    const chartWrap = document.getElementById("chart-wrap");
+    const chart = LightweightCharts.createChart(document.getElementById("chart-container"), {
+      layout: { background: { color: bgColor }, textColor: textColor },
+      grid: {
+        vertLines: { color: gridColor + "33" },
+        horzLines: { color: gridColor + "33" },
+      },
+      timeScale: { timeVisible: true, secondsVisible: false },
+      rightPriceScale: { borderColor: gridColor },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    });
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: "#26a69a",
+      downColor: "#ef5350",
+      borderVisible: false,
+      wickUpColor: "#26a69a",
+      wickDownColor: "#ef5350",
+    });
+
+    const heatCanvas = document.getElementById("heatmap-canvas");
+    const heatCtx = heatCanvas.getContext("2d");
+
+    function resizeAll() {
+      const rect = chartWrap.getBoundingClientRect();
+      chart.resize(rect.width, rect.height);
+
       const dpr = window.devicePixelRatio || 1;
-      const rect = canvas.getBoundingClientRect();
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      drawDepthChart();
+      heatCanvas.width = rect.width * dpr;
+      heatCanvas.height = rect.height * dpr;
+      heatCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      drawHeatmap();
     }
-    window.addEventListener("resize", resizeCanvas);
+    window.addEventListener("resize", resizeAll);
 
-    let latestBids = [];
-    let latestAsks = [];
+    fetch(`https://api.binance.com/api/v3/klines?symbol=${SYMBOL.toUpperCase()}&interval=${INTERVAL}&limit=100`)
+      .then((r) => r.json())
+      .then((rows) => {
+        candleSeries.setData(rows.map((r) => ({
+          time: Math.floor(r[0] / 1000),
+          open: parseFloat(r[1]),
+          high: parseFloat(r[2]),
+          low: parseFloat(r[3]),
+          close: parseFloat(r[4]),
+        })));
+        resizeAll();
+      })
+      .catch((err) => console.error("Failed to load initial candles", err));
 
-    function drawDepthChart() {
-      const rect = canvas.getBoundingClientRect();
-      const w = rect.width;
-      const h = rect.height;
-      ctx.clearRect(0, 0, w, h);
+    function connectKlineStream() {
+      const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${SYMBOL}@kline_${INTERVAL}`);
+      ws.onmessage = (event) => {
+        const k = JSON.parse(event.data).k;
+        candleSeries.update({
+          time: Math.floor(k.t / 1000),
+          open: parseFloat(k.o),
+          high: parseFloat(k.h),
+          low: parseFloat(k.l),
+          close: parseFloat(k.c),
+        });
+      };
+      ws.onclose = () => setTimeout(connectKlineStream, 2000);
+      ws.onerror = () => ws.close();
+    }
 
-      if (!latestBids.length || !latestAsks.length) return;
+    // ---- Liquidity heatmap: drawn in the chart's own price/time coordinates ----
+    const midPriceEl = document.getElementById("mid-price");
+    const spreadEl = document.getElementById("spread");
 
-      // Cumulative volume: bids walking down from best bid, asks walking up from best ask.
-      let cum = 0;
-      const bidLevels = latestBids.map(([price, qty]) => { cum += qty; return [price, cum]; });
-      cum = 0;
-      const askLevels = latestAsks.map(([price, qty]) => { cum += qty; return [price, cum]; });
+    const HISTORY_LIMIT = 900;       // ~15 minutes at one snapshot per second
+    const SNAPSHOT_INTERVAL_MS = 1000;
+    let heatmapHistory = [];
+    let lastSnapshotAt = 0;
 
-      const bestBid = latestBids[0][0];
-      const bestAsk = latestAsks[0][0];
-      const mid = (bestBid + bestAsk) / 2;
-      const spread = bestAsk - bestBid;
-      midPriceEl.textContent = "$" + mid.toFixed(2);
-      spreadEl.textContent = "spread $" + spread.toFixed(2);
+    function drawHeatmap() {
+      const rect = chartWrap.getBoundingClientRect();
+      heatCtx.clearRect(0, 0, rect.width, rect.height);
+      if (!heatmapHistory.length) return;
 
-      const minPrice = bidLevels[bidLevels.length - 1][0];
-      const maxPrice = askLevels[askLevels.length - 1][0];
-      const maxVolume = Math.max(bidLevels[bidLevels.length - 1][1], askLevels[askLevels.length - 1][1]);
+      let maxQty = 0;
+      for (const entry of heatmapHistory) {
+        for (const [, q] of entry.bids) if (q > maxQty) maxQty = q;
+        for (const [, q] of entry.asks) if (q > maxQty) maxQty = q;
+      }
+      if (maxQty === 0) return;
 
-      const padTop = 10, padBottom = 18, padSide = 6;
-      const plotW = w - padSide * 2;
-      const plotH = h - padTop - padBottom;
+      const colWidth = 4;
 
-      const xForPrice = (p) => padSide + ((p - minPrice) / (maxPrice - minPrice)) * plotW;
-      const yForVolume = (v) => padTop + plotH - (v / maxVolume) * plotH;
-
-      function drawArea(levels, strokeColor, fillColor) {
-        ctx.beginPath();
-        ctx.moveTo(xForPrice(levels[0][0]), yForVolume(0));
-        for (let i = 0; i < levels.length; i++) {
-          const [price, vol] = levels[i];
-          ctx.lineTo(xForPrice(price), yForVolume(vol));
-          if (i < levels.length - 1) ctx.lineTo(xForPrice(levels[i + 1][0]), yForVolume(vol));
+      function drawLevels(levels, x, rgb) {
+        for (const [price, qty] of levels) {
+          const y = candleSeries.priceToCoordinate(price);
+          if (y === null) continue;
+          const alpha = Math.min(1, qty / maxQty);
+          if (alpha < 0.05) continue;
+          heatCtx.fillStyle = `rgba(${rgb},${alpha.toFixed(2)})`;
+          heatCtx.fillRect(x - colWidth / 2, y - 1.5, colWidth, 3);
         }
-        ctx.lineTo(xForPrice(levels[levels.length - 1][0]), yForVolume(0));
-        ctx.closePath();
-        ctx.fillStyle = fillColor;
-        ctx.fill();
-        ctx.strokeStyle = strokeColor;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
       }
 
-      drawArea(bidLevels, "#26a69a", "rgba(38, 166, 154, 0.25)");
-      drawArea(askLevels, "#ef5350", "rgba(239, 83, 80, 0.25)");
-
-      // Mid-price marker.
-      ctx.strokeStyle = themeColor("--tg-theme-hint-color", "#999999");
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath();
-      ctx.moveTo(xForPrice(mid), padTop);
-      ctx.lineTo(xForPrice(mid), padTop + plotH);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      // Price axis labels.
-      ctx.fillStyle = themeColor("--tg-theme-hint-color", "#999999");
-      ctx.font = "10px -apple-system, sans-serif";
-      ctx.textAlign = "left";
-      ctx.fillText(minPrice.toFixed(0), padSide, h - 4);
-      ctx.textAlign = "right";
-      ctx.fillText(maxPrice.toFixed(0), w - padSide, h - 4);
+      for (const entry of heatmapHistory) {
+        const x = chart.timeScale().timeToCoordinate(entry.time);
+        if (x === null) continue;
+        drawLevels(entry.bids, x, "38,166,154");
+        drawLevels(entry.asks, x, "239,83,80");
+      }
     }
 
-    let ws;
-    let reconnectTimer;
     function connectDepthStream() {
-      ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@depth20@100ms");
+      const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${SYMBOL}@depth20@100ms`);
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
-        latestBids = data.bids.map(([p, q]) => [parseFloat(p), parseFloat(q)]);
-        latestAsks = data.asks.map(([p, q]) => [parseFloat(p), parseFloat(q)]);
-        drawDepthChart();
+        const bids = data.bids.map(([p, q]) => [parseFloat(p), parseFloat(q)]);
+        const asks = data.asks.map(([p, q]) => [parseFloat(p), parseFloat(q)]);
+
+        const bestBid = bids[0][0];
+        const bestAsk = asks[0][0];
+        midPriceEl.textContent = "$" + ((bestBid + bestAsk) / 2).toFixed(2);
+        spreadEl.textContent = "spread $" + (bestAsk - bestBid).toFixed(2);
+
+        const now = Date.now();
+        if (now - lastSnapshotAt >= SNAPSHOT_INTERVAL_MS) {
+          lastSnapshotAt = now;
+          heatmapHistory.push({ time: Math.floor(now / 1000), bids, asks });
+          if (heatmapHistory.length > HISTORY_LIMIT) heatmapHistory.shift();
+          drawHeatmap();
+        }
       };
       ws.onclose = () => {
         midPriceEl.textContent = "reconnecting…";
-        clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(connectDepthStream, 2000);
+        setTimeout(connectDepthStream, 2000);
       };
       ws.onerror = () => ws.close();
     }
 
-    resizeCanvas();
+    chart.timeScale().subscribeVisibleLogicalRangeChange(drawHeatmap);
+
+    resizeAll();
+    connectKlineStream();
     connectDepthStream();
   </script>
 </body>
