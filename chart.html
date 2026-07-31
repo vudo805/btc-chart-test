@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BTC Price Chart</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background-color: var(--tg-theme-bg-color, #ffffff);
+    color: var(--tg-theme-text-color, #000000);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+  }
+  #chart-frame {
+    display: block;
+    width: 100%;
+    height: 100vh;
+    border: 0;
+  }
+</style>
+</head>
+<body>
+  <iframe id="chart-frame" allowtransparency="true" scrolling="yes"></iframe>
+
+  <script>
+    const tg = window.Telegram && window.Telegram.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+
+    const theme = (tg && tg.colorScheme === "dark") ? "dark" : "light";
+
+    const src = "https://s.tradingview.com/widgetembed/?symbol=BINANCE%3ABTCUSDT"
+      + "&interval=15&hidesidetoolbar=1&style=1&timezone=Etc%2FUTC&theme=" + theme;
+
+    document.getElementById("chart-frame").src = src;
+  </script>
+</body>
+</html>
