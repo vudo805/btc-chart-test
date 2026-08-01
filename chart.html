@@ -48,6 +48,9 @@
   }
   #heatmap-canvas {
     pointer-events: none;
+    /* Lightweight Charts' own internal canvases use z-index: 1/2, which
+       paint over a z-index: auto sibling regardless of DOM order. */
+    z-index: 5;
   }
 </style>
 </head>
@@ -136,10 +139,14 @@
         // (HISTORY_LIMIT * SNAPSHOT_INTERVAL_MS below) - otherwise the
         // heatmap dots are squeezed into a sliver at the chart's edge and
         // are effectively invisible against the full fetched history.
-        const nowSec = Math.floor(Date.now() / 1000);
-        chart.timeScale().setVisibleRange({
-          from: nowSec - 15 * 60,
-          to: nowSec + 2 * 60,
+        // Logical (bar-index) range, not setVisibleRange's time-based one:
+        // setVisibleRange clamps `to` back to the last actual bar's
+        // timestamp and ignores rightOffset, so it can never show the few
+        // seconds of "future" space the live heatmap ticks need.
+        const desiredVisibleBars = 15; // ~15 minutes of 1m candles
+        chart.timeScale().setVisibleLogicalRange({
+          from: rows.length - desiredVisibleBars,
+          to: rows.length - 1 + 3, // + rightOffset
         });
         resizeAll();
       })
@@ -167,8 +174,21 @@
 
     const HISTORY_LIMIT = 900;       // ~15 minutes at one snapshot per second
     const SNAPSHOT_INTERVAL_MS = 1000;
+    const BAR_SECONDS = parseInt(INTERVAL, 10) * 60; // "1m" -> 60
     let heatmapHistory = [];
     let lastSnapshotAt = 0;
+
+    // timeToCoordinate() only resolves times that exactly match a real bar's
+    // timestamp - it does not interpolate between bars. Heatmap snapshots
+    // land on arbitrary seconds, so look up the coordinate of the bar that
+    // contains this second and offset by the sub-bar fraction instead.
+    function timeToX(t) {
+      const barTime = Math.floor(t / BAR_SECONDS) * BAR_SECONDS;
+      const barX = chart.timeScale().timeToCoordinate(barTime);
+      if (barX === null) return null;
+      const barSpacing = chart.timeScale().options().barSpacing;
+      return barX + ((t - barTime) / BAR_SECONDS) * barSpacing;
+    }
 
     function drawHeatmap() {
       const rect = chartWrap.getBoundingClientRect();
@@ -196,7 +216,7 @@
       }
 
       for (const entry of heatmapHistory) {
-        const x = chart.timeScale().timeToCoordinate(entry.time);
+        const x = timeToX(entry.time);
         if (x === null) continue;
         drawLevels(entry.bids, x, "33,150,243");
         drawLevels(entry.asks, x, "255,152,0");
@@ -218,8 +238,14 @@
         const now = Date.now();
         if (now - lastSnapshotAt >= SNAPSHOT_INTERVAL_MS) {
           lastSnapshotAt = now;
-          heatmapHistory.push({ time: Math.floor(now / 1000), bids, asks });
+          const nowSec = Math.floor(now / 1000);
+          heatmapHistory.push({ time: nowSec, bids, asks });
           if (heatmapHistory.length > HISTORY_LIMIT) heatmapHistory.shift();
+          // Keep following real time each tick - otherwise the view stays
+          // pinned to wherever it was at load and, once wall-clock time
+          // drifts past the last visible bar, timeToCoordinate() returns
+          // null for every new snapshot and the heatmap stops drawing.
+          chart.timeScale().scrollToRealTime();
           drawHeatmap();
         }
       };
