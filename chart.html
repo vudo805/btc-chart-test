@@ -177,6 +177,23 @@
     const BAR_SECONDS = parseInt(INTERVAL, 10) * 60; // "1m" -> 60
     let heatmapHistory = [];
     let lastSnapshotAt = 0;
+    let bucketSize = 10; // overwritten from heatmap.json's bucket_size once loaded
+
+    // Live depth20 levels are raw tick-size prices (~$0.01 apart) while the
+    // collector's published history is aggregated into $10 buckets. Drawing
+    // both at their native granularity puts wildly different magnitudes
+    // (a handful of BTC per raw level vs. a summed bucket) on the same color
+    // scale, and stacks many near-identical rows on top of each other every
+    // tick - bucket live levels the same way so they're comparable and no
+    // denser than the historical data.
+    function bucketLevels(levels) {
+      const buckets = new Map();
+      for (const [price, qty] of levels) {
+        const b = Math.round(price / bucketSize) * bucketSize;
+        buckets.set(b, (buckets.get(b) || 0) + qty);
+      }
+      return Array.from(buckets, ([price, qty]) => [price, qty]);
+    }
 
     // ---- Viridis-style colormap: dark purple (low) -> teal -> yellow (high) ----
     const VIRIDIS_STOPS = [
@@ -248,7 +265,12 @@
           if (y === null) continue;
           const t = Math.min(1, qty / qtyClamp);
           const [r, g, b] = viridisColor(t);
-          const alpha = Math.max(0.25, t);
+          // The heatmap canvas paints over the chart's own candle layer
+          // (see the z-index note above - there's no library-level way to
+          // sandwich it between the grid and the candles), so cap alpha
+          // well under 1 even at max magnitude, or dense cells fully hide
+          // price action instead of just tinting it.
+          const alpha = 0.2 + t * 0.45;
           heatCtx.fillStyle = `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
           heatCtx.fillRect(x - colWidth / 2, y - rowHeight / 2, colWidth, rowHeight);
         }
@@ -280,7 +302,11 @@
           const nowSec = Math.floor(now / 1000);
           const lastEntry = heatmapHistory[heatmapHistory.length - 1];
           if (!lastEntry || nowSec > lastEntry.time) {
-            heatmapHistory.push({ time: nowSec, bids, asks });
+            heatmapHistory.push({
+              time: nowSec,
+              bids: bucketLevels(bids),
+              asks: bucketLevels(asks),
+            });
             if (heatmapHistory.length > HISTORY_LIMIT) heatmapHistory.shift();
           }
           recomputeQtyClamp();
@@ -308,6 +334,7 @@
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (!data || !Array.isArray(data.snapshots)) return;
+          if (data.bucket_size) bucketSize = data.bucket_size;
           const existingTimes = new Set(heatmapHistory.map((e) => e.time));
           for (const s of data.snapshots) {
             if (!existingTimes.has(s.t)) {
