@@ -172,11 +172,55 @@
     const midPriceEl = document.getElementById("mid-price");
     const spreadEl = document.getElementById("spread");
 
-    const HISTORY_LIMIT = 900;       // ~15 minutes at one snapshot per second
+    const HISTORY_LIMIT = 2000;      // room for ~30min of coarser loaded history + live 1/s ticks
     const SNAPSHOT_INTERVAL_MS = 1000;
     const BAR_SECONDS = parseInt(INTERVAL, 10) * 60; // "1m" -> 60
     let heatmapHistory = [];
     let lastSnapshotAt = 0;
+
+    // ---- Viridis-style colormap: dark purple (low) -> teal -> yellow (high) ----
+    const VIRIDIS_STOPS = [
+      [0.00, [68, 1, 84]],
+      [0.13, [71, 44, 122]],
+      [0.25, [59, 81, 139]],
+      [0.38, [44, 113, 142]],
+      [0.50, [33, 144, 141]],
+      [0.63, [39, 173, 129]],
+      [0.75, [92, 200, 99]],
+      [0.88, [170, 220, 50]],
+      [1.00, [253, 231, 37]],
+    ];
+    function viridisColor(t) {
+      t = Math.max(0, Math.min(1, t));
+      for (let i = 0; i < VIRIDIS_STOPS.length - 1; i++) {
+        const [t0, c0] = VIRIDIS_STOPS[i];
+        const [t1, c1] = VIRIDIS_STOPS[i + 1];
+        if (t <= t1) {
+          const f = (t - t0) / (t1 - t0);
+          return [
+            Math.round(c0[0] + (c1[0] - c0[0]) * f),
+            Math.round(c0[1] + (c1[1] - c0[1]) * f),
+            Math.round(c0[2] + (c1[2] - c0[2]) * f),
+          ];
+        }
+      }
+      return VIRIDIS_STOPS[VIRIDIS_STOPS.length - 1][1];
+    }
+
+    // Percentile clamp (not raw max) so one large resting order doesn't wash
+    // out contrast for everything else. Recomputed once/sec, not per draw -
+    // drawHeatmap() runs on every tick and every visible-range change.
+    let qtyClamp = 1;
+    function recomputeQtyClamp() {
+      const values = [];
+      for (const entry of heatmapHistory) {
+        for (const [, q] of entry.bids) values.push(q);
+        for (const [, q] of entry.asks) values.push(q);
+      }
+      if (!values.length) { qtyClamp = 1; return; }
+      values.sort((a, b) => a - b);
+      qtyClamp = values[Math.min(values.length - 1, Math.floor(0.95 * values.length))] || 1;
+    }
 
     // timeToCoordinate() only resolves times that exactly match a real bar's
     // timestamp - it does not interpolate between bars. Heatmap snapshots
@@ -195,22 +239,17 @@
       heatCtx.clearRect(0, 0, rect.width, rect.height);
       if (!heatmapHistory.length) return;
 
-      let maxQty = 0;
-      for (const entry of heatmapHistory) {
-        for (const [, q] of entry.bids) if (q > maxQty) maxQty = q;
-        for (const [, q] of entry.asks) if (q > maxQty) maxQty = q;
-      }
-      if (maxQty === 0) return;
-
       const colWidth = 10;
       const rowHeight = 8;
 
-      function drawLevels(levels, x, rgb) {
+      function drawLevels(levels, x) {
         for (const [price, qty] of levels) {
           const y = candleSeries.priceToCoordinate(price);
           if (y === null) continue;
-          const alpha = Math.max(0.15, Math.min(1, qty / maxQty));
-          heatCtx.fillStyle = `rgba(${rgb},${alpha.toFixed(2)})`;
+          const t = Math.min(1, qty / qtyClamp);
+          const [r, g, b] = viridisColor(t);
+          const alpha = Math.max(0.25, t);
+          heatCtx.fillStyle = `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
           heatCtx.fillRect(x - colWidth / 2, y - rowHeight / 2, colWidth, rowHeight);
         }
       }
@@ -218,8 +257,8 @@
       for (const entry of heatmapHistory) {
         const x = timeToX(entry.time);
         if (x === null) continue;
-        drawLevels(entry.bids, x, "33,150,243");
-        drawLevels(entry.asks, x, "255,152,0");
+        drawLevels(entry.bids, x);
+        drawLevels(entry.asks, x);
       }
     }
 
@@ -239,8 +278,12 @@
         if (now - lastSnapshotAt >= SNAPSHOT_INTERVAL_MS) {
           lastSnapshotAt = now;
           const nowSec = Math.floor(now / 1000);
-          heatmapHistory.push({ time: nowSec, bids, asks });
-          if (heatmapHistory.length > HISTORY_LIMIT) heatmapHistory.shift();
+          const lastEntry = heatmapHistory[heatmapHistory.length - 1];
+          if (!lastEntry || nowSec > lastEntry.time) {
+            heatmapHistory.push({ time: nowSec, bids, asks });
+            if (heatmapHistory.length > HISTORY_LIMIT) heatmapHistory.shift();
+          }
+          recomputeQtyClamp();
           // Keep following real time each tick - otherwise the view stays
           // pinned to wherever it was at load and, once wall-clock time
           // drifts past the last visible bar, timeToCoordinate() returns
@@ -256,11 +299,37 @@
       ws.onerror = () => ws.close();
     }
 
+    // Backfill from the collector's persisted history so the heatmap isn't
+    // empty on a fresh page load - fetched in parallel with the live depth
+    // stream starting, not blocking it. Cache-bust: GitHub Pages/CDN can
+    // otherwise serve a stale heatmap.json for several minutes.
+    function loadHeatmapHistory() {
+      fetch(`./heatmap.json?v=${Date.now()}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (!data || !Array.isArray(data.snapshots)) return;
+          const existingTimes = new Set(heatmapHistory.map((e) => e.time));
+          for (const s of data.snapshots) {
+            if (!existingTimes.has(s.t)) {
+              heatmapHistory.push({ time: s.t, bids: s.bids, asks: s.asks });
+            }
+          }
+          heatmapHistory.sort((a, b) => a.time - b.time);
+          if (heatmapHistory.length > HISTORY_LIMIT) {
+            heatmapHistory = heatmapHistory.slice(heatmapHistory.length - HISTORY_LIMIT);
+          }
+          recomputeQtyClamp();
+          drawHeatmap();
+        })
+        .catch((err) => console.error("Failed to load heatmap history", err));
+    }
+
     chart.timeScale().subscribeVisibleLogicalRangeChange(drawHeatmap);
 
     resizeAll();
     connectKlineStream();
     connectDepthStream();
+    loadHeatmapHistory();
   </script>
 </body>
 </html>
