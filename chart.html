@@ -202,16 +202,16 @@
       }
       if (maxQty === 0) return;
 
-      const colWidth = 4;
+      const colWidth = 10;
+      const rowHeight = 8;
 
       function drawLevels(levels, x, rgb) {
         for (const [price, qty] of levels) {
           const y = candleSeries.priceToCoordinate(price);
           if (y === null) continue;
-          const alpha = Math.min(1, qty / maxQty);
-          if (alpha < 0.05) continue;
+          const alpha = Math.max(0.15, Math.min(1, qty / maxQty));
           heatCtx.fillStyle = `rgba(${rgb},${alpha.toFixed(2)})`;
-          heatCtx.fillRect(x - colWidth / 2, y - 1.5, colWidth, 3);
+          heatCtx.fillRect(x - colWidth / 2, y - rowHeight / 2, colWidth, rowHeight);
         }
       }
 
